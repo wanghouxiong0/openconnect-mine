@@ -1017,6 +1017,16 @@ JNIEXPORT void JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_setXMLPo
 	openconnect_set_xmlpost(ctx->vpninfo, arg);
 }
 
+JNIEXPORT void JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_setMTUDetect(
+	JNIEnv *jenv, jobject jobj, jboolean arg)
+{
+	struct libctx *ctx = getctx(jenv, jobj);
+
+	if (!ctx)
+		return;
+	openconnect_set_mtu_detect(ctx->vpninfo, arg);
+}
+
 /* simple cases: return a const string (no need to free it) */
 
 #define RETURN_STRING_START \

@@ -128,6 +128,7 @@ public abstract class LibOpenConnect {
 	public synchronized native int setTokenMode(int tokenMode, String tokenString);
 	public synchronized native void setCSDWrapper(String wrapper, String TMPDIR, String PATH);
 	public synchronized native void setXMLPost(boolean isEnabled);
+	public synchronized native void setMTUDetect(boolean isEnabled);
 	public synchronized native void setClientCert(String cert, String sslKey);
 	public synchronized native void setReqMTU(int mtu);
 	public synchronized native void setPFS(boolean isEnabled);

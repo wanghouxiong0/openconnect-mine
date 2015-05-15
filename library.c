@@ -473,6 +473,11 @@ void openconnect_set_xmlpost(struct openconnect_info *vpninfo, int enable)
 	vpninfo->xmlpost = enable;
 }
 
+void openconnect_set_mtu_detect(struct openconnect_info *vpninfo, int enable)
+{
+	vpninfo->detect_mtu = enable;
+}
+
 int openconnect_set_client_cert(struct openconnect_info *vpninfo,
 				const char *cert, const char *sslkey)
 {

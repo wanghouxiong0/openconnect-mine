@@ -32,10 +32,14 @@
 #define OPENCONNECT_API_VERSION_MINOR 3
 
 /*
+ * API version 5.4:
+ *  - Add openconnect_set_mtu_detect()
+ *
  * API version 5.3:
  *  - Add openconnect_override_getaddrinfo().
  *  - Add openconnect_get_cstp_compression().
  *  - Add openconnect_get_dtls_compression().
+ *  - Add openconnect_set_mtu_detect().
  *
  * API version 5.2:
  *  - Add openconnect_set_http_auth(), openconnect_set_protocol().
@@ -436,6 +440,8 @@ int openconnect_set_client_cert(struct openconnect_info *, const char *cert,
 				const char *sslkey);
 const char *openconnect_get_ifname(struct openconnect_info *);
 void openconnect_set_reqmtu(struct openconnect_info *, int reqmtu);
+void openconnect_set_mtu_detect(struct openconnect_info *vpninfo, int enable);
+
 void openconnect_set_dpd(struct openconnect_info *, int min_seconds);
 
 /* The returned structures are owned by the library and may be freed/replaced
