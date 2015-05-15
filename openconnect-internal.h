@@ -35,6 +35,10 @@
 #include <sys/select.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#ifdef __linux__
+/* for IPV6_PATHMTU */
+#include <linux/in6.h>
+#endif
 #include <arpa/inet.h>
 #include <fcntl.h>
 #endif
@@ -540,6 +544,7 @@ struct openconnect_info {
 	char *ifname;
 
 	int reqmtu, basemtu;
+	int detect_mtu;
 	const char *banner;
 
 	struct oc_ip_info ip_info;

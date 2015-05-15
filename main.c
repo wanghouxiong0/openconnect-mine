@@ -186,6 +186,7 @@ enum {
 	OPT_PFS,
 	OPT_PROXY_AUTH,
 	OPT_HTTP_AUTH,
+	OPT_DETECT_MTU,
 };
 
 #ifdef __sun__
@@ -221,6 +222,7 @@ static const struct option long_options[] = {
 	OPTION("help", 0, 'h'),
 	OPTION("http-auth", 1, OPT_HTTP_AUTH),
 	OPTION("interface", 1, 'i'),
+	OPTION("detect-mtu", 0, OPT_DETECT_MTU),
 	OPTION("mtu", 1, 'm'),
 	OPTION("base-mtu", 1, OPT_BASEMTU),
 	OPTION("script", 1, 's'),
@@ -762,6 +764,7 @@ static void usage(void)
 	printf("      --csd-user=USER             %s\n", _("Drop privileges during CSD execution"));
 	printf("      --csd-wrapper=SCRIPT        %s\n", _("Run SCRIPT instead of CSD binary"));
 #endif
+	printf("      --detect-mtu                %s\n", _("Auto-detect MTU"));
 	printf("  -m, --mtu=MTU                   %s\n", _("Request MTU from server"));
 	printf("      --base-mtu=MTU              %s\n", _("Indicate path MTU to/from server"));
 	printf("  -p, --key-password=PASS         %s\n", _("Set key passphrase or TPM SRK PIN"));
@@ -1222,6 +1225,9 @@ int main(int argc, char **argv)
 		case 'i':
 			ifname = dup_config_arg();
 			break;
+		case OPT_DETECT_MTU:
+			vpninfo->detect_mtu = 1;
+			break;
 		case 'm': {
 			int mtu = atol(config_arg);
 			if (mtu < 576) {
@@ -1473,6 +1479,10 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
+	if (vpninfo->dtls_state != DTLS_DISABLED &&
+	    openconnect_setup_dtls(vpninfo, 60))
+		fprintf(stderr, _("Set up DTLS failed; using SSL instead\n"));
+
 	if (!vpnc_script)
 		vpnc_script = xstrdup(default_vpncscript);
 #ifndef _WIN32
@@ -1500,10 +1510,6 @@ int main(int argc, char **argv)
 		}
 	}
 #endif
-
-	if (vpninfo->dtls_state != DTLS_DISABLED &&
-	    openconnect_setup_dtls(vpninfo, 60))
-		fprintf(stderr, _("Set up DTLS failed; using SSL instead\n"));
 
 	openconnect_get_ip_info(vpninfo, &ip_info, NULL, NULL);
 

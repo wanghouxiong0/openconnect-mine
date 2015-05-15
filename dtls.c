@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 
 #include "openconnect-internal.h"
 
@@ -58,6 +59,17 @@ int RAND_bytes(char *buf, int len)
 	return 1;
 }
 #endif
+
+static
+void ms_sleep(unsigned ms)
+{
+	struct timespec tv;
+
+	tv.tv_sec = ms/1000;
+	tv.tv_nsec = (ms%1000) * 1000 * 1000;
+
+	nanosleep(&tv, NULL);
+}
 
 /*
  * The master-secret is generated randomly by the client. The server
@@ -328,9 +340,13 @@ static int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 	return 0;
 }
 
-static int dtls_try_handshake(struct openconnect_info *vpninfo)
+static int dtls_try_handshake(struct openconnect_info *vpninfo, unsigned wait)
 {
-	int ret = SSL_do_handshake(vpninfo->dtls_ssl);
+	int ret;
+	const char *c;
+
+ restart:
+	ret = SSL_do_handshake(vpninfo->dtls_ssl);
 
 	if (ret == 1) {
 		vpninfo->dtls_state = DTLS_CONNECTED;
@@ -410,8 +426,13 @@ static int dtls_try_handshake(struct openconnect_info *vpninfo)
 	ret = SSL_get_error(vpninfo->dtls_ssl, ret);
 	if (ret == SSL_ERROR_WANT_WRITE || ret == SSL_ERROR_WANT_READ) {
 		static int badossl_bitched = 0;
-		if (time(NULL) < vpninfo->new_dtls_started + 12)
-			return 0;
+		if (time(NULL) < vpninfo->new_dtls_started + 12) {
+			if (wait) {
+				ms_sleep(100);
+				goto restart;
+			} else
+				return 0;
+		}
 		if (((OPENSSL_VERSION_NUMBER >= 0x100000b0L && OPENSSL_VERSION_NUMBER <= 0x100000c0L) || \
 		     (OPENSSL_VERSION_NUMBER >= 0x10001040L && OPENSSL_VERSION_NUMBER <= 0x10001060L) || \
 		     OPENSSL_VERSION_NUMBER == 0x10002000L) && !badossl_bitched) {
@@ -447,6 +468,12 @@ void append_dtls_ciphers(struct openconnect_info *vpninfo, struct oc_text_buf *b
 #else
 	buf_append(buf, "AES256-SHA:AES128-SHA:DES-CBC3-SHA:DES-CBC-SHA");
 #endif
+}
+
+static
+void detect_mtu(struct openconnect_info *vpninfo)
+{
+	/* Not implemented */
 }
 
 #elif defined(DTLS_GNUTLS)
@@ -599,11 +626,15 @@ static int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 	return 0;
 }
 
-static int dtls_try_handshake(struct openconnect_info *vpninfo)
+/* @wait: if non zero this function will wait until the handshake is finished.
+ */
+static int dtls_try_handshake(struct openconnect_info *vpninfo, unsigned wait)
 {
-	int err = gnutls_handshake(vpninfo->dtls_ssl);
+	int err;
 	char *str;
 
+ restart:
+	err = gnutls_handshake(vpninfo->dtls_ssl);
 	if (!err) {
 #ifdef HAVE_GNUTLS_DTLS_SET_DATA_MTU
 		/* Make sure GnuTLS's idea of the MTU is sufficient to take
@@ -651,8 +682,13 @@ static int dtls_try_handshake(struct openconnect_info *vpninfo)
 	}
 
 	if (err == GNUTLS_E_AGAIN) {
-		if (time(NULL) < vpninfo->new_dtls_started + 12)
-			return 0;
+		if (time(NULL) < vpninfo->new_dtls_started + 12) {
+			if (wait) {
+				ms_sleep(100);
+				goto restart;
+			} else
+				return 0;
+		}
 		vpn_progress(vpninfo, PRG_DEBUG, _("DTLS handshake timed out\n"));
 	}
 
@@ -672,6 +708,126 @@ static int dtls_try_handshake(struct openconnect_info *vpninfo)
 void dtls_shutdown(struct openconnect_info *vpninfo)
 {
 	dtls_close(vpninfo);
+}
+
+/* Old glibc doesn't define that */
+#if defined(__linux__) &&!defined(IPV6_PATHMTU)
+# define IPV6_PATHMTU 61
+#endif
+
+static
+void detect_mtu(struct openconnect_info *vpninfo)
+{
+	int max, min, cur, ret;
+	int prev_mtu = vpninfo->ip_info.mtu;
+	unsigned char *buf;
+	char id[4];
+
+	if (gnutls_rnd(GNUTLS_RND_NONCE, id, sizeof(id)) < 0 || vpninfo->ip_info.mtu < 1+sizeof(id))
+		return;
+
+	/* detect MTU */
+	buf = calloc(1, 1 + vpninfo->ip_info.mtu);
+	if (!buf) {
+		vpn_progress(vpninfo, PRG_ERR, _("Allocation failed\n"));
+		return;
+	}
+	memcpy(&buf[1], id, sizeof(id));
+
+	cur = max = vpninfo->ip_info.mtu;
+	min = vpninfo->ip_info.mtu/2;
+
+	gnutls_record_set_timeout(vpninfo->dtls_ssl, 2400);
+	if (vpninfo->peer_addr->sa_family == AF_INET) { /* IPv4 */
+
+		vpn_progress(vpninfo, PRG_DEBUG,
+		     _("Initiating IPv4 MTU detection (min=%d, max=%d)\n"), min, max);
+
+		while (max > min) {
+			cur = (min + max + 1) / 2;
+			buf[0] = AC_PKT_DPD_OUT;
+
+			do {
+				ret = DTLS_SEND(vpninfo->dtls_ssl, buf, cur+1);
+			} while(ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED);
+
+			if (ret != cur+1) {
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("Failed to send DPD request (%d): %s\n"), cur, gnutls_strerror(ret));
+				goto mtu_fail;
+			}
+
+			memset(buf, 0, sizeof(id)+1);
+			do {
+				ret = DTLS_RECV(vpninfo->dtls_ssl, buf, cur + 1);
+			} while(ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED);
+
+			/* if we receive unrelated packets skip MTU detection */
+			if (ret > 0 && (buf[0] != AC_PKT_DPD_RESP || memcmp(&buf[1], id, sizeof(buf) != 0)))
+				goto skip_mtu;
+
+			if (ret <= 0) {
+				vpn_progress(vpninfo, PRG_ERR,
+				     _("Failed to recv DPD request (%d): %s\n"), cur, gnutls_strerror(ret));
+				goto mtu_fail;
+			}
+
+			/* success, try better */
+			if (cur == max) {
+				break;
+			}
+			min = cur;
+			continue;
+ mtu_fail:
+			max = cur-1;
+		}
+#if defined(IPPROTO_IPV6)
+	} else if (vpninfo->peer_addr->sa_family == AF_INET6) { /* IPv6 */
+		vpn_progress(vpninfo, PRG_DEBUG,
+		     _("Initiating IPv6 MTU detection\n"));
+
+		buf[0] = AC_PKT_DPD_OUT;
+		do {
+			ret = DTLS_SEND(vpninfo->dtls_ssl, buf, cur+1);
+		} while(ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED);
+
+		if (ret != cur+1) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Failed to send DPD request (%d): %s\n"), cur, gnutls_strerror(ret));
+			goto mtu6_fail;
+		}
+
+		memset(buf, 0, sizeof(id)+1);
+		do {
+			ret = DTLS_RECV(vpninfo->dtls_ssl, buf, cur + 1);
+		} while(ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED);
+
+		if (ret > 0 && (buf[0] != AC_PKT_DPD_RESP || memcmp(&buf[1], id, sizeof(buf) != 0)))
+			goto skip_mtu;
+
+		if (ret <= 0) {
+			struct ip6_mtuinfo mtuinfo;
+			socklen_t len = sizeof(mtuinfo);
+			max = 0;
+			vpn_progress(vpninfo, PRG_ERR,
+			     _("Failed to recv DPD request (%d): %s\n"), cur, gnutls_strerror(ret));
+ mtu6_fail:
+			if (getsockopt(vpninfo->dtls_fd, IPPROTO_IPV6, IPV6_PATHMTU, &mtuinfo, &len) >= 0) {
+				max = mtuinfo.ip6m_mtu;
+				if (max >= 0 && max < cur) {
+					gnutls_dtls_set_mtu(vpninfo->dtls_ssl, max);
+					cur = gnutls_dtls_get_data_mtu(vpninfo->dtls_ssl) - /*ipv6*/40 - /*udp*/20 - /*oc dtls*/1;
+				}
+			}
+		}
+	}
+#endif
+	gnutls_record_set_timeout(vpninfo->dtls_ssl, 0);
+	vpninfo->ip_info.mtu = cur;
+	vpn_progress(vpninfo, PRG_INFO,
+	     _("Detected MTU of %d bytes (was %d)\n"), vpninfo->ip_info.mtu, prev_mtu);
+ skip_mtu:
+	free(buf);
 }
 #endif
 
@@ -726,7 +882,7 @@ static int connect_dtls_socket(struct openconnect_info *vpninfo)
 
 	time(&vpninfo->new_dtls_started);
 
-	return dtls_try_handshake(vpninfo);
+	return dtls_try_handshake(vpninfo, 0);
 }
 
 void dtls_close(struct openconnect_info *vpninfo)
@@ -816,6 +972,16 @@ int dtls_setup(struct openconnect_info *vpninfo, int dtls_attempt_period)
 		     _("DTLS initialised. DPD %d, Keepalive %d\n"),
 		     vpninfo->dtls_times.dpd, vpninfo->dtls_times.keepalive);
 
+	if (vpninfo->detect_mtu) {
+		/* we wait for the DTLS handshake to complete when
+		 * we want to detect MTU */
+		if (vpninfo->dtls_state == DTLS_CONNECTING)
+			dtls_try_handshake(vpninfo, 1);
+
+		if (vpninfo->dtls_state == DTLS_CONNECTED)
+			detect_mtu(vpninfo);
+	}
+
 	return 0;
 }
 
@@ -831,7 +997,7 @@ int dtls_mainloop(struct openconnect_info *vpninfo, int *timeout)
 	}
 
 	if (vpninfo->dtls_state == DTLS_CONNECTING) {
-		dtls_try_handshake(vpninfo);
+		dtls_try_handshake(vpninfo, 0);
 		return 0;
 	}
 
@@ -934,7 +1100,7 @@ int dtls_mainloop(struct openconnect_info *vpninfo, int *timeout)
 		if (vpninfo->dtls_times.rekey_method == REKEY_SSL) {
 			time(&vpninfo->new_dtls_started);
 			vpninfo->dtls_state = DTLS_CONNECTING;
-			ret = dtls_try_handshake(vpninfo);
+			ret = dtls_try_handshake(vpninfo, 0);
 			if (ret) {
 				vpn_progress(vpninfo, PRG_ERR, _("DTLS Rehandshake failed; reconnecting.\n"));
 				return connect_dtls_socket(vpninfo);
